@@ -1,11 +1,11 @@
 modelling_CO2 <- function() {
 
-  df <- blaucat_dat[, c("Matèria orgànica del sediment_mean", "Carboni orgànic del sediment\r\n_mean")]
+  df <- blaucat_dat[, c("Carboni orgànic del sediment_mean",
+                        "Ús del sòl del lloc de mostreig",
+                        "Distància al mar")]
+  df$`Ús del sòl del lloc de mostreig` <- factor(df$`Ús del sòl del lloc de mostreig`)
 
 
-  # From organic matter to organic carbon we must multiply by 0.45.
-  df$`Carboni orgànic del sediment
-_mean`
-
+  m1 <- glm(`Carboni orgànic del sediment_mean` ~ ., data = df)
 
 }
