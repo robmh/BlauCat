@@ -1,0 +1,105 @@
+---
+title: "Log-normal regression with gamlss"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Log-normal regression with gamlss}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+
+
+### Loading data
+
+To facilitate the analysis we have loaded the databases into the **BlauCat** package as an internal dataset labelled **blaucat_data**. That is, the data will be available to the user once the package is loaded with the **library** or **require** functions.
+
+To fill in some of the missing organic carbon data in the original dataset we used the transformation $CO = 0.45\times MO$, where $CO$ indicates organic carbon and $MO$ stands for organic matter. This way, we ended up with 56 valid points.
+
+```{r setup}
+library(BlauCat)
+```
+
+
+### Log-normal regression
+
+After some trials, we have turned to a log-normal regression to account for the long positive tail of the data. We used the **gamlsss* R package for this, picking the log-normal family distribution with 
+
+As a first step we will select the predictors that will be used in the regression. Factors are defined as such.
+
+```{r select}
+df <- blaucat_dat[, c("Carboni orgànic del sediment_mean",
+                      "Ús del sòl del lloc de mostreig",
+                      "Distància al mar",
+                      "Distància a zones agrícoles",
+                      "Distància a zones urbanes",
+                      "Temperatura mitjana de l'aire",
+                      "Precipitació acumulada",
+                      "Elevació respecte al nivell del mar",
+                      "Tipus de sòl")]
+df$`Ús del sòl del lloc de mostreig` <- factor(df$`Ús del sòl del lloc de mostreig`)
+df$`Tipus de sòl` <- factor(df$`Tipus de sòl`)
+df <- na.omit(df)
+```
+
+<br>
+
+Then, we log-transform the distance predictors.
+
+```{r log-transform}
+df$`Distància al mar` <- log(df$`Distància al mar`)
+df$`Distància a zones agrícoles` <- log(df$`Distància a zones agrícoles`)
+df$`Distància a zones urbanes` <- log(df$`Distància a zones urbanes`)
+```
+
+<br>
+
+ We will also rename the variables from Catalan names to English ones. It turns out that one of the levels in factor "Soil" is empty, so we will refactor it.
+ 
+```{r rename}
+names(df) <- c("Carbon", "LandUs", "DistSea", "DistAgri", "DistUrba", "Temp", "Prec", "Elev", "Soil")
+df$Soil <- factor(df$Soil)
+```
+
+<br>
+
+Finally, we try a regression model with the **gamlss** package, using a log-normal distribution for the residuals. The dispersion variable $\sigma$ is modelled simply by a constant.
+
+```{r model}
+# Regression package.
+suppressWarnings(suppressPackageStartupMessages(library(gamlss,
+                                                        warn.conflicts = FALSE,
+                                                        verbose = FALSE,
+                                                        quietly = TRUE)))
+# Rescale package.
+suppressWarnings(suppressPackageStartupMessages(library(arm,
+                                                        warn.conflicts = FALSE,
+                                                        verbose = FALSE,
+                                                        quietly = TRUE)))
+df2 <- lapply(df, rescale)
+df2$Carbon <- df$Carbon
+m1 <- gamlss(formula = Carbon ~ ., sigma.formula = ~ 1,
+             data = df2, family = LOGNO, control = gamlss.control(trace = FALSE))
+library(broom.mixed)
+tidy_m1 <- tidy(m1)
+knitr::kable(tidy_m1, digits = 4, caption = "GAMLSS Model Results")
+```
+
+<br>
+
+As an additional performance indicator we can calculate the linear correlation between prediction and response, noting that this may be unreliable due to the presence of heterocedasticity.
+
+```{r linearcor}
+library(kableExtra)
+knitr::kable(data.frame(Pearson = cor(df$Carbon, predict(m1)),
+  Spearman = cor(df$Carbon, predict(m1), method = "spearman")), digits = 4,
+  caption = "Predicted vs. response") |> kable_styling(full_width = TRUE)
+```
+ 
+ 
