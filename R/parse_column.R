@@ -1,7 +1,6 @@
 #' Title
 #'
 #' @param x
-#' @param col_name
 #'
 #' @returns
 #'

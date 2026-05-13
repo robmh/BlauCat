@@ -7,7 +7,7 @@
 parse_column(x)
 }
 \arguments{
-\item{col_name}{}
+\item{x}{}
 }
 \description{
 Title
