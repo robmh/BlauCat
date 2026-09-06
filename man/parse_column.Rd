@@ -6,9 +6,6 @@
 \usage{
 parse_column(x)
 }
-\arguments{
-\item{x}{}
-}
 \description{
 Title
 }

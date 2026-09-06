@@ -1,0 +1,118 @@
+---
+title: "Log-normal regression with gamlss"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Log-normal regression with gamlss}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+
+
+### Loading data
+
+To facilitate the analysis we have loaded the databases into the **BlauCat** package as an internal dataset labelled **blaucat_data**. That is, the data will be available to the user once the package is loaded with the **library** or **require** functions.
+
+To fill in some of the missing organic carbon data in the original dataset we used the transformation $CO = 0.45\times MO$, where $CO$ indicates organic carbon and $MO$ stands for organic matter. This way, we ended up with 56 valid points.
+
+```{r setup}
+library(BlauCat)
+```
+
+
+### Log-normal regression
+
+After some trials, we have turned to a log-normal regression to account for the long positive tail of the data. We used the **gamlsss* R package for this, picking the log-normal family distribution with 
+
+As a first step we will select the predictors that will be used in the regression. Factors are defined as such.
+
+```{r select}
+df <- blaucat_dat[, c("Carboni orgànic del sediment_mean",
+                      "Codi CORINE 2024",
+                      "Cota per dalt",
+                      "Percentatge de sorra_mean",
+                      "Temperatura mitjana de l'aire",
+                      "Precipitació acumulada",
+                      "Elevació respecte al nivell del mar",
+                      "Distància a zones agrícoles",
+                      "Distància a zones urbanes")]
+df$`Cota per dalt` <- as.numeric(df$`Cota per dalt`)
+
+# Get distance to nearest water body.
+blaucat_dat$`Distància a badia` <- as.numeric(blaucat_dat$`Distància a badia`)
+df$`Distància aigua` <- with(blaucat_dat,
+                             pmin(`Distància al mar`, `Distància a badia`,
+                                  `Distància al riu`, na.rm = TRUE))
+
+# Recodify CORINE.
+df <- df |>
+  dplyr::mutate(`Codi CORINE 2024` = dplyr::recode(`Codi CORINE 2024`,
+    "Canyissars i formacions anàlogues" = "Canyissars",
+    "Formacions de Cladium mariscus" = "Cladium mariscus",
+    "Vegetació (salicornars. prats. jonqueres...) dels sòls salins. poc o molt humits o. fins i tot. inundats. del litoral" = "Prats i jonqueres"
+  ))
+
+df <- na.omit(df)
+```
+
+<br>
+
+Then, we log-transform the distance predictors.
+
+```{r log-transform}
+df$`Distància aigua` <- log(df$`Distància aigua`) # There are a few zeros.
+df$`Distància a zones agrícoles` <- log(df$`Distància a zones agrícoles`)
+df$`Distància a zones urbanes` <- log(df$`Distància a zones urbanes`)
+```
+
+<br>
+
+ We will also rename the variables from Catalan names to English ones.
+ 
+```{r rename}
+names(df) <- c("Carbon", "Corine", "Upperlimit", "MeanSand", "Temp", "Prec",
+               "Elev", "DistAgric", "DistUrb", "DistWater")
+```
+
+<br>
+
+Finally, we try a regression model with the **gamlss** package, using a log-normal distribution for the residuals. The dispersion variable $\sigma$ is modelled simply by a constant.
+
+```{r model}
+# Regression package.
+suppressWarnings(suppressPackageStartupMessages(library(gamlss,
+                                                        warn.conflicts = FALSE,
+                                                        verbose = FALSE,
+                                                        quietly = TRUE)))
+# Rescale package.
+suppressWarnings(suppressPackageStartupMessages(library(arm,
+                                                        warn.conflicts = FALSE,
+                                                        verbose = FALSE,
+                                                        quietly = TRUE)))
+library(broom.mixed)
+
+# Do not rescale categorical variables.
+model <- lm.beta::lm.beta(lm(formula = log(Carbon) ~ ., data = df))
+tidy_model <- tidy(model)
+knitr::kable(tidy_model, digits = 4, caption = "GAMLSS Model Results")
+```
+
+<br>
+
+As an additional performance indicator we can calculate the linear correlation between prediction and response, noting that this may be unreliable due to the presence of heterocedasticity.
+
+```{r linearcor}
+library(kableExtra)
+pr <- exp(predict(model) + 0.5*sd(resid(model))^2)
+knitr::kable(data.frame(Pearson = cor(df$Carbon, pr),
+  Spearman = cor(df$Carbon, pr, method = "spearman")), digits = 4,
+  caption = "Predicted vs. response") |> kable_styling(full_width = TRUE)
+```
+

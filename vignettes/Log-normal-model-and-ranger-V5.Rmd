@@ -1,0 +1,417 @@
+---
+title: "Log-normal gamlss and random forest models"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Log-normal regression with gamlss}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>"
+)
+```
+
+
+
+### Loading data
+
+To facilitate the analysis we have loaded the databases into the **BlauCat** package as an internal dataset labelled **blaucat_data**. That is, the data will be available to the user once the package is loaded with the **library** or **require** functions.
+
+To fill in some of the missing organic carbon data in the original dataset we used the transformation $CO = 0.45\times MO$, where $CO$ indicates organic carbon and $MO$ stands for organic matter. This way, we ended up with 56 valid points.
+
+```{r setup}
+library(BlauCat)
+```
+
+
+### Data pre-processing
+
+As a first step we will select the predictors that will be used in the regression. Factors are defined as such.
+
+```{r select}
+df <- blaucat_dat[, c("Carboni orgànic del sediment_mean",
+                      "Codi CORINE 2024",
+                      "Cota per dalt",
+                      "Percentatge de sorra_mean",
+                      "Temperatura mitjana de l'aire",
+                      "Precipitació acumulada",
+                      "Elevació respecte al nivell del mar",
+                      "Distància a zones agrícoles",
+                      "Distància a zones urbanes")]
+df$`Cota per dalt` <- as.numeric(df$`Cota per dalt`)
+
+# Get distance to nearest water body.
+blaucat_dat$`Distància a badia` <- as.numeric(blaucat_dat$`Distància a badia`)
+df$`Distància aigua` <- with(blaucat_dat,
+                             pmin(`Distància al mar`, `Distància a badia`,
+                                  `Distància al riu`, na.rm = TRUE))
+
+# Recodify CORINE.
+df <- df |>
+  dplyr::mutate(`Codi CORINE 2024` = dplyr::recode(`Codi CORINE 2024`,
+    "Canyissars i formacions anàlogues" = "Canyissars",
+    "Formacions de Cladium mariscus" = "Cladium mariscus",
+    "Vegetació (salicornars. prats. jonqueres...) dels sòls salins. poc o molt humits o. fins i tot. inundats. del litoral" = "Prats i jonqueres"
+  ))
+
+df <- na.omit(df)
+```
+
+<br>
+
+We have a look at relationships between variables.
+
+```{r mapa-general}
+# General view.
+blaucat_dat$`UTM X` <- as.numeric(blaucat_dat$`UTM X`)
+blaucat_dat$`UTM Y` <- as.numeric(blaucat_dat$`UTM Y`)
+xy <- terra::vect(blaucat_dat, geom = c("UTM X", "UTM Y"), crs = "EPSG:25831")
+terra::values(xy) <- NULL
+
+spain_adm1 <- geodata::gadm(country = "ESP", level = 1, path = tempdir())
+catalonia <- spain_adm1[spain_adm1$NAME_1 == "Cataluña", ] |>
+  terra::project("EPSG:25831")
+
+library(terra)
+library(mapSpain)
+library(geodata)
+
+# 1. Fetch Catalonia boundary and major rivers
+cat_sf <- esp_get_ccaa(ccaa = "Catalunya")
+rivers_sf <- esp_get_rivers()
+
+cat_sv <- vect(cat_sf)
+rivers_sv <- vect(rivers_sf)
+
+# 2. Fetch SRTM / Shuttle elevation data for Spain (returns a SpatRaster)
+dem_spain <- elevation_30s(country = "ESP", path = tempdir())
+
+# 3. Project all layers to UTM 31N (EPSG:25831)
+target_crs <- "EPSG:25831"
+
+cat_utm <- project(cat_sv, target_crs)
+rivers_utm <- project(rivers_sv, target_crs)
+
+# Project DEM raster using bilinear interpolation for continuous values
+dem_utm <- project(dem_spain, target_crs, method = "bilinear")
+
+# 4. Crop and mask DEM & rivers to Catalonia's boundary
+dem_cat <- crop(dem_utm, cat_utm) |> mask(cat_utm)
+rivers_cat <- crop(rivers_utm, cat_utm)
+
+# 5. Plot topographic map with river overlay
+# Plot raster elevation base layer
+terra::plot(
+  dem_cat,
+  col = terrain.colors(50),
+  main = "MDE (m)",
+  pax = list(cex.axis = 1.5),
+  plg = list(cex = 1.5)
+)
+
+# Overlay border vector
+plot(cat_utm, border = "gray20", lwd = 1, add = TRUE)
+
+# Overlay river vector lines
+plot(rivers_cat, col = "dodgerblue3", lwd = 2, add = TRUE)
+
+# terra::plot(catalonia)
+terra::plot(xy, add = TRUE, cex = 1.5)
+
+xy_wgs84 <- terra::project(xy, "EPSG:4326")
+
+writeVector(xy_wgs84, "../inst/google/catalonia_data.kml", filetype = "KML", overwrite = TRUE)
+
+```
+
+<br>
+
+Then, we log-transform the distance predictors.
+
+```{r log-transform}
+df$`Distància aigua` <- log(df$`Distància aigua`) # There are a few zeros.
+df$`Distància a zones agrícoles` <- log(df$`Distància a zones agrícoles`)
+df$`Distància a zones urbanes` <- log(df$`Distància a zones urbanes`)
+```
+
+<br>
+
+ We will also rename the variables from Catalan names to English ones.
+ 
+```{r rename}
+names(df) <- c("Carbon", "Corine", "Upperlimit", "MeanSand", "Temp", "Prec",
+               "Elev", "DistAgric", "DistUrb", "DistWater")
+df$Corine <- factor(df$Corine)
+```
+
+
+We plot dependent variable vs. categorical (CORINE).
+
+```{r violin-plot}
+library(ggplot2)
+
+ggplot(df, aes(x = factor(Corine), y = Carbon, fill = factor(Corine))) +
+  # 1. Violin shapes with custom transparency and outline
+  geom_violin(color = "grey30", alpha = 0.7, trim = FALSE, show.legend = FALSE) +
+  
+  # 2. Narrow inner boxplot to display median and quartiles
+  geom_boxplot(width = 0.15, fill = "white", color = "grey20", outlier.shape = NA, alpha = 0.9) +
+  
+  # 3. Jittered observations to show actual sample distribution
+  geom_jitter(width = 0.08, alpha = 0.3, color = "black", size = 1.2) +
+  
+  # 4. Color palette per category
+  scale_fill_brewer(palette = "Set2") +
+  
+  # 5. Clean, publication-ready formatting
+  labs(
+    x = "CORINE Category",
+    y = "Carbon Content",
+    title = "Distribucio de Carbó vs. CORINE",
+    subtitle = "Violins indiquen densitat; caixes internes indiquen mediana i IQR"
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14, margin = margin(b = 4)),
+    plot.subtitle = element_text(color = "grey40", size = 10, margin = margin(b = 10)),
+    axis.title = element_text(face = "bold", size = 11),
+    axis.text = element_text(size = 10, color = "black"),
+    panel.grid.major.x = element_blank(), # Remove vertical gridlines
+    panel.grid.minor = element_blank(),
+    panel.border = element_rect(color = "black", linewidth = 0.8)
+  )
+
+```
+
+Plot the numeric variables.
+
+```{r scatter-plots}
+library(tidyr)
+
+# Pivot continuous variables (excluding Carbon and Corine)
+df_long <- pivot_longer(
+  df, 
+  cols = -c(Carbon, Corine), 
+  names_to = "Variable", 
+  values_to = "Value"
+)
+
+ggplot(df_long, aes(x = Value, y = Carbon)) +
+  geom_point(alpha = 0.7, color = "#2c3e50") +
+  facet_wrap(~ Variable, scales = "free_x") +
+  theme_bw() + # Base theme with full box borders
+  theme(
+    # Panel box formatting
+    panel.background = element_rect(fill = "#f8f9fa"),
+    panel.border = element_rect(color = "#333333", fill = NA, linewidth = 1),
+    panel.spacing = unit(1.2, "lines"), # Increase physical gap between panels
+    
+    # Strip (header) formatting
+    strip.background = element_rect(fill = "#e2e8f0", color = "#333333", linewidth = 1),
+    strip.text = element_bold_text <- element_text(size = 10, face = "bold", color = "#1a202c"),
+    
+    # Grid lines
+    panel.grid.major = element_line(color = "#e2e8f0", linewidth = 0.5),
+    panel.grid.minor = element_blank()
+  ) +
+  labs(
+    x = "Predictor Value", 
+    y = "Carbon", 
+    title = "Carbon vs Continuous Predictors"
+  )
+```
+
+
+
+<br>
+
+### Linear regression with log-transformation of dependent variable.
+
+We try a regression model assuming a log-normal distribution for the residuals.
+
+```{r model-lm}
+lm_model <- lm.beta::lm.beta(lm(formula = log(Carbon) ~ ., data = df))
+tidy_model <- broom::tidy(lm_model)
+knitr::kable(tidy_model, digits = 4, caption = "Model de regressió")
+```
+
+<br>
+
+Plot diagnostic for linear regression model.
+
+```{r lm-diagnostics}
+
+library(ggfortify)
+
+autoplot(lm_model, 
+         which = 1:4, 
+         ncol = 2, 
+         colour = "#2c3e50", 
+         smooth.colour = "#e74c3c", 
+         smooth.linewidth = 0.8) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    panel.border = element_rect(color = "black", linewidth = 0.8),
+    panel.grid.minor = element_blank(),
+    panel.spacing = unit(1, "lines")
+  )
+```
+
+<br>
+
+As an additional performance indicator we can calculate the linear correlation between prediction and response, noting that this may be unreliable due to the presence of heterocedasticity.
+
+```{r linearcor}
+library(kableExtra)
+pr <- exp(predict(lm_model) + 0.5*sd(resid(lm_model))^2)
+knitr::kable(data.frame(Pearson = cor(df$Carbon, pr),
+  Spearman = cor(df$Carbon, pr, method = "spearman")), digits = 4,
+  caption = "Predicted vs. response") |> kable_styling(full_width = TRUE)
+```
+
+
+
+### Random forest model (ranger package)
+
+
+```{r model-ranger}
+library(ranger)
+library(knitr)
+library(dplyr)
+library(pdp)
+library(gridExtra)
+
+# 1. Fit ranger model with importance enabled
+rf_model <- ranger(
+  formula = log(Carbon) ~ .,
+  data = df,
+  num_trees = 1000,
+  importance = "permutation"
+)
+
+# 2. Extract importance values into a data frame
+importance_df <- data.frame(
+  Variable = names(ranger::importance(rf_model)),
+  Importance = ranger::importance(rf_model)
+) |> 
+  arrange(desc(Importance))
+
+# 3. Format as a table
+kable(
+  importance_df, 
+  digits = 4, 
+  row.names = FALSE,
+  caption = "Ranger Random Forest Variable Importance"
+)
+
+```
+
+
+
+```{r PDP-plots}
+
+# Define Bootstrapped PDP Function
+
+get_bootstrapped_pdp <- function(model, var, data, n_boot = 50, grid_resolution = 20) {
+  
+  if (is.numeric(data[[var]])) {
+    grid_vals <- seq(min(data[[var]], na.rm = TRUE), max(data[[var]], na.rm = TRUE), length.out = grid_resolution)
+  } else {
+    grid_vals <- unique(data[[var]])
+  }
+  
+  boot_results <- replicate(n_boot, {
+    boot_df <- data[sample(nrow(data), replace = TRUE), ]
+    pd <- partial(model, pred.var = var, train = boot_df, grid.resolution = grid_resolution)
+    pd$yhat
+  })
+  
+  data.frame(
+    x = grid_vals,
+    yhat = rowMeans(boot_results),
+    lower = apply(boot_results, 1, quantile, probs = 0.025),
+    upper = apply(boot_results, 1, quantile, probs = 0.975)
+  )
+}
+
+# Generate PDP Plots with Confidence Bands & Slanted Labels
+
+predictors <- c("Corine", "Upperlimit", "MeanSand", "Temp", "Prec", 
+                "Elev", "DistAgric", "DistUrb", "DistWater")
+
+set.seed(123)
+
+pdp_plots <- lapply(predictors, function(var) {
+  
+  pdp_data <- get_bootstrapped_pdp(rf_model, var = var, data = df, n_boot = 50)
+  
+  # Check if variable is categorical/factor or explicitly "Corine"
+  is_categorical <- is.factor(df[[var]]) || is.character(df[[var]]) || var == "Corine"
+  
+  if (!is_categorical) {
+    # Numeric Plot: Ribbon + Line
+    p <- ggplot(pdp_data, aes(x = x, y = yhat)) +
+      geom_ribbon(aes(ymin = lower, ymax = upper), fill = "skyblue", alpha = 0.4) +
+      geom_line(color = "dodgerblue4", linewidth = 1) +
+      theme_minimal()
+  } else {
+    # Categorical Plot: PointRange with Slanted X Labels
+    p <- ggplot(pdp_data, aes(x = factor(x), y = yhat)) +
+      geom_pointrange(aes(ymin = lower, ymax = upper), color = "dodgerblue4", size = 0.6) +
+      theme_minimal() +
+      theme(
+        axis.text.x = element_text(
+          angle = 45,     # Slanted angle
+          vjust = 1,      # Vertical alignment to clear the axis
+          hjust = 1,      # Horizontal alignment to anchor text right-side
+          size = 8        # Slightly smaller size for longer level names
+        )
+      )
+  }
+  
+  p + labs(
+    title = var,
+    x = var,
+    y = "log(Carbon)"
+  ) +
+  theme(
+    plot.title = element_text(size = 11, face = "bold", hjust = 0.5),
+    axis.title = element_text(size = 9)
+  )
+})
+
+# Display PDP plots in a 3x3 grid
+grid.arrange(grobs = pdp_plots, ncol = 3)
+```
+
+
+### Training and test.
+
+```{r train-test}
+nsimu <- 1000
+p <- .9
+carbon_rmse <- matrix(0, nsimu, 2)
+for (i in 1:nsimu) {
+  index <- sample_stratified(df, p = p, "Corine")
+  
+  df_train <- df[index, ]
+  train_lm <- lm(log(Carbon) ~ ., data = df_train)
+  train_rf <- ranger::ranger(log(Carbon) ~ ., num.trees = 1000, data =  df_train)
+  
+  df_test <- df[-index, ]
+  lm_sd <- mean(resid(train_lm)^2)
+  carbon_rmse[i, 1] <- sqrt(mean((exp(predict(train_lm, df_test)+.5*lm_sd^2) - df_test$Carbon)^2))
+  carbon_rmse[i, 2] <- sqrt(mean((exp(predict(train_rf, data = df_test)$predictions+.5*lm_sd^2) - df_test$Carbon)^2))
+}
+
+# Check RMSE for training/test approach.
+mean_rmse <- setNames(apply(carbon_rmse, 2,mean), c("Linear regression", "Random Forest"))
+knitr::kable(mean_rmse)
+
+```
+
+
