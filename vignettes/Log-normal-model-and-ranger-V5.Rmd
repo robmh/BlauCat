@@ -62,7 +62,7 @@ df <- na.omit(df)
 
 <br>
 
-We have a look at relationships between variables.
+We have a look at sampling locations.
 
 ```{r mapa-general}
 # General view.
@@ -155,51 +155,54 @@ library(ggplot2)
 
 ggplot(df, aes(x = factor(Corine), y = Carbon, fill = factor(Corine))) +
   # 1. Violin shapes with custom transparency and outline
-  geom_violin(color = "grey30", alpha = 0.7, trim = FALSE, show.legend = FALSE) +
+  geom_violin(color = "grey30", alpha = 0.7, trim = FALSE,
+              show.legend = FALSE, width = .9, bounds = c(0, Inf)) +
   
   # 2. Narrow inner boxplot to display median and quartiles
   geom_boxplot(width = 0.15, fill = "white", color = "grey20", outlier.shape = NA, alpha = 0.9) +
   
   # 3. Jittered observations to show actual sample distribution
-  geom_jitter(width = 0.08, alpha = 0.3, color = "black", size = 1.2) +
+  geom_jitter(width = 0.08, alpha = 0.3, color = "black", size = 2) +
   
   # 4. Color palette per category
   scale_fill_brewer(palette = "Set2") +
   
   # 5. Clean, publication-ready formatting
   labs(
-    x = "CORINE Category",
-    y = "Carbon Content",
+    x = "",
+    y = "Contingut Carbó",
     title = "Distribucio de Carbó vs. CORINE",
     subtitle = "Violins indiquen densitat; caixes internes indiquen mediana i IQR"
   ) +
-  theme_bw() +
+  theme_bw(base_size = 18) +
   theme(
-    plot.title = element_text(face = "bold", size = 14, margin = margin(b = 4)),
-    plot.subtitle = element_text(color = "grey40", size = 10, margin = margin(b = 10)),
+    plot.title = element_text(face = "bold", size = 18, margin = margin(b = 4)),
+    plot.subtitle = element_text(color = "grey40", size = 16, margin = margin(b = 10)),
     axis.title = element_text(face = "bold", size = 11),
-    axis.text = element_text(size = 10, color = "black"),
+    axis.text = element_text(size = 14, color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
     panel.grid.major.x = element_blank(), # Remove vertical gridlines
     panel.grid.minor = element_blank(),
-    panel.border = element_rect(color = "black", linewidth = 0.8)
+    panel.border = element_rect(color = "black", linewidth = 0.8),
+    legend.position = "none"
   )
-
 ```
 
 Plot the numeric variables.
 
 ```{r scatter-plots}
 library(tidyr)
+library(ggplot2)
 
 # Pivot continuous variables (excluding Carbon and Corine)
 df_long <- pivot_longer(
   df, 
   cols = -c(Carbon, Corine), 
   names_to = "Variable", 
-  values_to = "Value"
+  values_to = "Valor"
 )
 
-ggplot(df_long, aes(x = Value, y = Carbon)) +
+ggplot(df_long, aes(x = Valor, y = Carbon)) +
   geom_point(alpha = 0.7, color = "#2c3e50") +
   facet_wrap(~ Variable, scales = "free_x") +
   theme_bw() + # Base theme with full box borders
@@ -285,11 +288,17 @@ library(dplyr)
 library(pdp)
 library(gridExtra)
 
+# Encode the Corine categorical variable.
+df_encoded <- as.data.frame(model.matrix(Carbon ~ . - 1, data = df))
+df_encoded <- janitor::clean_names(df_encoded[, 1:6])
+colnames(df_encoded) <- sub("corine_", "", colnames(df_encoded))
+df_encoded <- cbind(df_encoded, df[, -2])
+                    
 # 1. Fit ranger model with importance enabled
 rf_model <- ranger(
-  formula = log(Carbon) ~ .,
-  data = df,
-  num_trees = 1000,
+  formula = Carbon ~ .,
+  data = df_encoded,
+  num.trees = 1000,
   importance = "permutation"
 )
 
@@ -308,6 +317,20 @@ kable(
   caption = "Ranger Random Forest Variable Importance"
 )
 
+# 4. Figure.
+ggplot(importance_df, aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    x = "Variable",
+    y = "Importància (Permutació)"
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text = element_text(size = 14),   # Size of tick labels (variable names & values)
+    axis.title = element_text(size = 16, face = "bold"), # Size of axis titles
+    plot.title = element_text(size = 18, face = "bold")  # Size of plot title
+  )
 ```
 
 
@@ -316,7 +339,7 @@ kable(
 
 # Define Bootstrapped PDP Function
 
-get_bootstrapped_pdp <- function(model, var, data, n_boot = 50, grid_resolution = 20) {
+get_bootstrapped_pdp <- function(model, var, data, n_boot = 100, grid_resolution = 20) {
   
   if (is.numeric(data[[var]])) {
     grid_vals <- seq(min(data[[var]], na.rm = TRUE), max(data[[var]], na.rm = TRUE), length.out = grid_resolution)
@@ -340,14 +363,19 @@ get_bootstrapped_pdp <- function(model, var, data, n_boot = 50, grid_resolution 
 
 # Generate PDP Plots with Confidence Bands & Slanted Labels
 
-predictors <- c("Corine", "Upperlimit", "MeanSand", "Temp", "Prec", 
+# predictors <- c("Corine", "Upperlimit", "MeanSand", "Temp", "Prec", 
+#                 "Elev", "DistAgric", "DistUrb", "DistWater")
+predictors <- c("canyissars", "cladium_mariscus",
+                "conreus_abandonats", "llacunes_litorals",
+                "matollars_halofils_salicornars",  "prats_i_jonqueres",
+                "Upperlimit", "MeanSand", "Temp", "Prec", 
                 "Elev", "DistAgric", "DistUrb", "DistWater")
 
 set.seed(123)
 
 pdp_plots <- lapply(predictors, function(var) {
   
-  pdp_data <- get_bootstrapped_pdp(rf_model, var = var, data = df, n_boot = 50)
+  pdp_data <- get_bootstrapped_pdp(rf_model, var = var, data = df_encoded, n_boot = 100)
   
   # Check if variable is categorical/factor or explicitly "Corine"
   is_categorical <- is.factor(df[[var]]) || is.character(df[[var]]) || var == "Corine"
@@ -376,7 +404,7 @@ pdp_plots <- lapply(predictors, function(var) {
   p + labs(
     title = var,
     x = var,
-    y = "log(Carbon)"
+    y = "Carbon"
   ) +
   theme(
     plot.title = element_text(size = 11, face = "bold", hjust = 0.5),
@@ -393,24 +421,35 @@ grid.arrange(grobs = pdp_plots, ncol = 3)
 
 ```{r train-test}
 nsimu <- 1000
-p <- .9
+p <- .8
 carbon_rmse <- matrix(0, nsimu, 2)
+carbon_corr <- matrix(0, nsimu, 2)
 for (i in 1:nsimu) {
   index <- sample_stratified(df, p = p, "Corine")
   
-  df_train <- df[index, ]
+  df_train_lm <- df[index, ]
+  df_train_rf <- df_encoded[index, ]
   train_lm <- lm(log(Carbon) ~ ., data = df_train)
-  train_rf <- ranger::ranger(log(Carbon) ~ ., num.trees = 1000, data =  df_train)
+  train_rf <- ranger::ranger(Carbon ~ ., num.trees = 1000, data =  df_train_rf)
   
-  df_test <- df[-index, ]
+  df_test_lm <- df[-index, ]
+  df_test_rf <- df_encoded[-index, ]
+  
   lm_sd <- mean(resid(train_lm)^2)
-  carbon_rmse[i, 1] <- sqrt(mean((exp(predict(train_lm, df_test)+.5*lm_sd^2) - df_test$Carbon)^2))
-  carbon_rmse[i, 2] <- sqrt(mean((exp(predict(train_rf, data = df_test)$predictions+.5*lm_sd^2) - df_test$Carbon)^2))
+  carbon_rmse[i, 1] <- sqrt(mean((exp(predict(train_lm, df_test_lm)+.5*lm_sd^2) - df_test_lm$Carbon)^2))
+  carbon_rmse[i, 2] <- sqrt(mean((predict(train_rf, data = df_test_rf)$predictions - df_test_rf$Carbon)^2))
+  # carbon_rmse[i, 2] <-
+  #       sqrt(mean((exp(predict(train_rf, data = df_test)$predictions+.5*lm_sd^2) - df_test$Carbon)^2))
+
+  
+  carbon_corr[i, 1] <- cor(exp(predict(train_lm, df_test_lm)+.5*lm_sd^2), df_test_lm$Carbon)
+  carbon_corr[i, 2] <- cor(predict(train_rf, data = df_test_rf)$predictions, df_test_rf$Carbon)
 }
 
 # Check RMSE for training/test approach.
-mean_rmse <- setNames(apply(carbon_rmse, 2,mean), c("Linear regression", "Random Forest"))
-knitr::kable(mean_rmse)
+df_results <- data.frame(RMSE = apply(carbon_rmse, 2,mean), R2 = apply(carbon_corr, 2,mean))
+rownames(df_results) <- c("lm", "ranger")
+knitr::kable(df_results)
 
 ```
 
