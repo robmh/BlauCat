@@ -288,16 +288,10 @@ library(dplyr)
 library(pdp)
 library(gridExtra)
 
-# Encode the Corine categorical variable.
-df_encoded <- as.data.frame(model.matrix(Carbon ~ . - 1, data = df))
-df_encoded <- janitor::clean_names(df_encoded[, 1:6])
-colnames(df_encoded) <- sub("corine_", "", colnames(df_encoded))
-df_encoded <- cbind(df_encoded, df[, -2])
-                    
 # 1. Fit ranger model with importance enabled
 rf_model <- ranger(
-  formula = Carbon ~ .,
-  data = df_encoded,
+  formula = log(Carbon) ~ .,
+  data = df,
   num.trees = 1000,
   importance = "permutation"
 )
@@ -363,19 +357,19 @@ get_bootstrapped_pdp <- function(model, var, data, n_boot = 100, grid_resolution
 
 # Generate PDP Plots with Confidence Bands & Slanted Labels
 
-# predictors <- c("Corine", "Upperlimit", "MeanSand", "Temp", "Prec", 
-#                 "Elev", "DistAgric", "DistUrb", "DistWater")
-predictors <- c("canyissars", "cladium_mariscus",
-                "conreus_abandonats", "llacunes_litorals",
-                "matollars_halofils_salicornars",  "prats_i_jonqueres",
-                "Upperlimit", "MeanSand", "Temp", "Prec", 
+predictors <- c("Upperlimit", "MeanSand", "Temp", "Prec",
                 "Elev", "DistAgric", "DistUrb", "DistWater")
+# predictors <- c("canyissars", "cladium_mariscus",
+#                 "conreus_abandonats", "llacunes_litorals",
+#                 "matollars_halofils_salicornars",  "prats_i_jonqueres",
+#                 "Upperlimit", "MeanSand", "Temp", "Prec", 
+#                 "Elev", "DistAgric", "DistUrb", "DistWater")
 
 set.seed(123)
 
 pdp_plots <- lapply(predictors, function(var) {
   
-  pdp_data <- get_bootstrapped_pdp(rf_model, var = var, data = df_encoded, n_boot = 100)
+  pdp_data <- get_bootstrapped_pdp(rf_model, var = var, data = df, n_boot = 100)
   
   # Check if variable is categorical/factor or explicitly "Corine"
   is_categorical <- is.factor(df[[var]]) || is.character(df[[var]]) || var == "Corine"
@@ -421,9 +415,10 @@ grid.arrange(grobs = pdp_plots, ncol = 3)
 
 ```{r train-test}
 nsimu <- 1000
-p <- .8
+p <- .7
 carbon_rmse <- matrix(0, nsimu, 4)
 carbon_corr <- matrix(0, nsimu, 4)
+
 for (i in 1:nsimu) {
   index <- sample_stratified(df, p = p, "Corine")
   
